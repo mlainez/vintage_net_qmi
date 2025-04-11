@@ -14,7 +14,9 @@ defmodule VintageNetQMI.SessionProvisioning do
   end
 
   def init(args) do
-    state = %__MODULE__{
+    ifname = Keyword.fetch!(args, :ifname)
+
+    state = %{
       ifname: ifname,
       qmi: VintageNetQMI.qmi_name(ifname),
       slot_id: nil,
@@ -22,10 +24,10 @@ defmodule VintageNetQMI.SessionProvisioning do
       active: false
     }
 
-    card_status = UserIdentity.get_card_status(stat.qmi)
+    card_status = UserIdentity.get_cards_status(state.qmi)
     {slot_id, application_id} = extract_slot_id_and_application_id(card_status)
-    {:ok} = UserIdentity.provision_uim_session(slot_id, application_id)
-    {:ok, state | %{active: true, slot_id: slot_id, application_id: application_id}}
+    {:ok} = UserIdentity.provision_uim_session(state.qmi, slot_id, application_id)
+    {:ok, %{state | active: true, slot_id: slot_id, application_id: application_id}}
   end
 
   defp extract_slot_id_and_application_id(card_status) do
