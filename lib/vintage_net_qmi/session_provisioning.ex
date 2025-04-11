@@ -1,5 +1,6 @@
 defmodule VintageNetQMI.SessionProvisioning do
   @moduledoc false
+  require Logger
 
   use GenServer
   alias QMI.UserIdentity
@@ -25,13 +26,15 @@ defmodule VintageNetQMI.SessionProvisioning do
     }
 
     card_status = UserIdentity.get_cards_status(state.qmi)
+    Logger.info("[VintageNetQMI] Card status: #{inspect(card_status, limit: :infinity)}")
     {slot_id, application_id} = extract_slot_id_and_application_id(card_status)
+    Logger.info("[VintageNetQMI] SlotID and ApplicationID: #{inspect({slot_id, application_id})}")
     {:ok} = UserIdentity.provision_uim_session(state.qmi, slot_id, application_id)
     {:ok, %{state | active: true, slot_id: slot_id, application_id: application_id}}
   end
 
-  defp extract_slot_id_and_application_id(card_status) do
-    case Enum.find(card_status.cards, fn card -> card.card_state == 1 end) do
+  defp extract_slot_id_and_application_id(%{cards: cards}) when is_list(cards) do
+    case Enum.find(cards, fn card -> card.card_state == 1 end) do
       nil ->
         {nil, nil}
 
@@ -42,4 +45,6 @@ defmodule VintageNetQMI.SessionProvisioning do
         {slot_id, nil}
     end
   end
+
+  defp extract_slot_id_and_application_id(_), do: {nil, nil}
 end
