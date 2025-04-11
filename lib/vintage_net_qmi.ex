@@ -134,7 +134,7 @@ defmodule VintageNetQMI do
          name: qmi_name(ifname),
          indication_callback: indication_callback(ifname)
        ]},
-      {VIntageNetQMI.SessionProvisioning, ifname: ifname},
+      {VintageNetQMI.SessionProvisioning, ifname: ifname},
       {VintageNetQMI.Connectivity, ifname: ifname},
       {VintageNetQMI.Connection,
        [
