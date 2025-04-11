@@ -130,9 +130,11 @@ defmodule VintageNetQMI do
       {QMI.Supervisor,
        [
          ifname: ifname,
+         device_path: normalized_config.vintage_net_qmi[:device_path],
          name: qmi_name(ifname),
          indication_callback: indication_callback(ifname)
        ]},
+      {VIntageNetQMI.SessionProvisioning, ifname: ifname},
       {VintageNetQMI.Connectivity, ifname: ifname},
       {VintageNetQMI.Connection,
        [
