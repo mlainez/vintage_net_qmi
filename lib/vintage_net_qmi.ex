@@ -125,6 +125,8 @@ defmodule VintageNetQMI do
       {:fun, QMI, :configure_linux, [ifname]}
     ]
 
+    Logger.warning("[VintageNetQMI] Normalized config: #{inspect(normalized_config, limit: :infinity)}")
+
     child_specs = [
       {VintageNetQMI.Indications, ifname: ifname},
       {QMI.Supervisor,
