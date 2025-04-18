@@ -118,10 +118,11 @@ defmodule VintageNetQMI do
         %{type: __MODULE__} = config,
         _opts
       ) do
+    Logger.warning("[VintageNetQMI] Config: #{inspect(config)}")
     normalized_config = normalize(config)
     Logger.warning("[VintageNetQMI] Normalized config: #{inspect(normalized_config)}")
     radio_technologies_preference = normalized_config.vintage_net_qmi[:only_radio_technologies]
-    device_path = normalized_config.vintage_net_qmi.device_path
+    device_path = normalized_config.vintage_net_qmi[:device_path]
 
     up_cmds = [
       {:fun, QMI, :configure_linux, [ifname]}
