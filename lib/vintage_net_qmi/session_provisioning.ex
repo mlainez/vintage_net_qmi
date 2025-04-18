@@ -24,7 +24,7 @@ defmodule VintageNetQMI.SessionProvisioning do
       application_id: nil,
       active: false
     }
-
+    Logger.warning("[VintageNetQMI] Get Card status")
     card_status = UserIdentity.get_cards_status(state.qmi)
     Logger.warning("[VintageNetQMI] Card status: #{inspect(card_status, limit: :infinity)}")
     {slot_id, application_id} = extract_slot_id_and_application_id(card_status)
