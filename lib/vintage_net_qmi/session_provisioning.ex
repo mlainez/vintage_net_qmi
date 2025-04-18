@@ -24,7 +24,6 @@ defmodule VintageNetQMI.SessionProvisioning do
       application_id: nil,
       active: false
     }
-    Logger.warning("[VintageNetQMI] Get Card status")
     card_status = UserIdentity.get_cards_status(state.qmi)
     Logger.warning("[VintageNetQMI] Card status: #{inspect(card_status, limit: :infinity)}")
     {slot_id, application_id} = extract_slot_id_and_application_id(card_status)
@@ -33,7 +32,7 @@ defmodule VintageNetQMI.SessionProvisioning do
     {:ok, %{state | active: true, slot_id: slot_id, application_id: application_id}}
   end
 
-  defp extract_slot_id_and_application_id(%{cards: cards}) when is_list(cards) do
+  defp extract_slot_id_and_application_id({:ok, %{cards: cards}}) when is_list(cards) do
     case Enum.find(cards, fn card -> card.card_state == 1 end) do
       nil ->
         {nil, nil}
