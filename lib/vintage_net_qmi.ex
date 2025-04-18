@@ -116,9 +116,10 @@ defmodule VintageNetQMI do
   def to_raw_config(
         ifname,
         %{type: __MODULE__} = config,
-        _opts
+        opts
       ) do
     Logger.warning("[VintageNetQMI] Config: #{inspect(config)}")
+    Logger.warning("[VintageNetQMI] Config: #{inspect(opts)}")
     normalized_config = normalize(config)
     Logger.warning("[VintageNetQMI] Normalized config: #{inspect(normalized_config)}")
     radio_technologies_preference = normalized_config.vintage_net_qmi[:only_radio_technologies]
