@@ -24,12 +24,20 @@ defmodule VintageNetQMI.SessionProvisioning do
       application_id: nil,
       active: false
     }
+
     card_status = UserIdentity.get_cards_status(state.qmi)
     Logger.warning("[VintageNetQMI] Card status: #{inspect(card_status, limit: :infinity)}")
-    {slot_id, application_id} = extract_slot_id_and_application_id(card_status)
-    Logger.warning("[VintageNetQMI] SlotID and ApplicationID: #{inspect({slot_id, application_id})}")
-    {:ok} = UserIdentity.provision_uim_session(state.qmi, slot_id, application_id)
-    {:ok, %{state | active: true, slot_id: slot_id, application_id: application_id}}
+    case extract_slot_id_and_application_id(card_status) do
+      {nil, nil} ->
+        Logger.warning("[VintageNetQMI] No SIM card found")
+        {:ok, state}
+      {slot_id, nil} ->
+        Logger.warning("[VintageNetQMI] No application found")
+        {:ok, state}
+      {slot_id, application_id} ->
+        {:ok} = UserIdentity.provision_uim_session(state.qmi, slot_id, application_id)
+        {:ok, %{state | active: true, slot_id: slot_id, application_id: application_id}}
+    end
   end
 
   defp extract_slot_id_and_application_id({:ok, %{cards: cards}}) when is_list(cards) do
