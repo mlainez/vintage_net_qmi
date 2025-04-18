@@ -50,6 +50,8 @@ defmodule VintageNetQMI do
   that may also be useful.
   """
 
+  require Logger
+
   @behaviour VintageNet.Technology
 
   alias VintageNet.Interface.RawConfig
