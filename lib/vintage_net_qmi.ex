@@ -85,10 +85,9 @@ defmodule VintageNetQMI do
             {field, to_string(field)}
           end
 
-        new_config = %{
-          config
-          | vintage_net_qmi: Map.put(qmi, :service_providers, [service_provider])
-        }
+        new_qmi = Map.put(qmi, :service_providers, [service_provider])
+
+        new_config = %{config | vintage_net_qmi: new_qmi}
 
         raise ArgumentError,
               """
@@ -122,19 +121,18 @@ defmodule VintageNetQMI do
       ) do
     normalized_config = normalize(config)
     radio_technologies_preference = normalized_config.vintage_net_qmi[:only_radio_technologies]
+    device_path = normalized_config.vintage_net_qmi[:device_path]
 
     up_cmds = [
       {:fun, QMI, :configure_linux, [ifname]}
     ]
-
-    Logger.warning("[VintageNetQMI] Normalized config: #{inspect(normalized_config, limit: :infinity)}")
 
     child_specs = [
       {VintageNetQMI.Indications, ifname: ifname},
       {QMI.Supervisor,
        [
          ifname: ifname,
-         device_path: normalized_config.vintage_net_qmi[:device_path],
+         device_path: device_path,
          name: qmi_name(ifname),
          indication_callback: indication_callback(ifname)
        ]},
