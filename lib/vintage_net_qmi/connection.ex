@@ -148,11 +148,12 @@ defmodule VintageNetQMI.Connection do
   end
 
   defp try_to_connect(state) do
-    three_3gpp_profile_index = 1
+    three_3gpp_profile_index = 3
     iccid = state.iccid
     providers = state.service_providers
 
     with :ok <- validate_iccid(iccid),
+         Logger.warning("[VintageNetQMI]: Trying to connect with ICCID: #{inspect(iccid)}"),
          {:ok, provider} <- ServiceProvider.select_provider_by_iccid(providers, iccid),
          PropertyTable.put(VintageNet, mobile_prop(state.ifname, "apn"), provider.apn),
          :ok <- set_roaming_allowed_for_provider(provider, three_3gpp_profile_index, state),
