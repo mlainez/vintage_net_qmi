@@ -3,7 +3,7 @@ defmodule VintageNetQMI.SessionProvisioning do
   require Logger
 
   use GenServer
-  alias QMI.UserIdentity
+  alias QMI.{UserIdentity, DeviceManagement}
 
   def start_link(args) do
     ifname = Keyword.fetch!(args, :ifname)
@@ -36,6 +36,7 @@ defmodule VintageNetQMI.SessionProvisioning do
         {:ok, state}
       {slot_id, application_id} ->
         {:ok} = UserIdentity.provision_uim_session(state.qmi, slot_id, application_id)
+        :ok = DeviceManagement.set_operating_mode(state.qmi, :online)
         {:ok, %{state | active: true, slot_id: slot_id, application_id: application_id}}
     end
   end
