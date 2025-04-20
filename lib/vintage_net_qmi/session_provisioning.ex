@@ -31,11 +31,12 @@ defmodule VintageNetQMI.SessionProvisioning do
       {nil, nil} ->
         Logger.warning("[VintageNetQMI] No SIM card found")
         {:ok, state}
-      {slot_id, nil} ->
+      {_slot_id, nil} ->
         Logger.warning("[VintageNetQMI] No application found")
         {:ok, state}
       {slot_id, application_id} ->
         {:ok} = UserIdentity.provision_uim_session(state.qmi, slot_id, application_id)
+        Process.sleep(2000)
         :ok = DeviceManagement.set_operating_mode(state.qmi, :online)
         {:ok, %{state | active: true, slot_id: slot_id, application_id: application_id}}
     end
