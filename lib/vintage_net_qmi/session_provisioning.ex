@@ -25,7 +25,6 @@ defmodule VintageNetQMI.SessionProvisioning do
       active: false
     }
 
-    :ok = DeviceManagement.set_operating_mode(state.qmi, :online)
     card_status = UserIdentity.get_cards_status(state.qmi)
     Logger.warning("[VintageNetQMI] Card status: #{inspect(card_status, limit: :infinity)}")
     case extract_slot_id_and_application_id(card_status) do
@@ -37,6 +36,7 @@ defmodule VintageNetQMI.SessionProvisioning do
         {:ok, state}
       {slot_id, application_id} ->
         {:ok} = UserIdentity.provision_uim_session(state.qmi, slot_id, application_id)
+        :ok = DeviceManagement.set_operating_mode(state.qmi, :online)
         {:ok, %{state | active: true, slot_id: slot_id, application_id: application_id}}
     end
   end
