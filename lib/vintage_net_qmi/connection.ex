@@ -16,7 +16,7 @@ defmodule VintageNetQMI.Connection do
 
   require Logger
 
-  @configuration_retry 30_000
+  @configuration_retry 60_000
 
   @typedoc """
   Options for to establish the connection
@@ -66,7 +66,7 @@ defmodule VintageNetQMI.Connection do
         qmi: VintageNetQMI.qmi_name(ifname),
         service_providers: providers,
         iccid: iccid,
-        connect_retry_interval: 30_000,
+        connect_retry_interval: 60_000,
         radio_technologies: radio_technologies,
         configuration: Configuration.new()
       }
@@ -133,7 +133,7 @@ defmodule VintageNetQMI.Connection do
 
     _ =
       if Configuration.completely_configured?(new_state.configuration) do
-        Process.send_after(self(), :try_to_connect, 1_000)
+        Process.send_after(self(), :try_to_connect, 10_000)
       end
 
     {:noreply, new_state}
