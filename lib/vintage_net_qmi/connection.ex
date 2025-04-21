@@ -148,7 +148,7 @@ defmodule VintageNetQMI.Connection do
   end
 
   defp try_to_connect(state) do
-    three_3gpp_profile_index = 3
+    three_3gpp_profile_index = 1
     iccid = state.iccid
     providers = state.service_providers
 

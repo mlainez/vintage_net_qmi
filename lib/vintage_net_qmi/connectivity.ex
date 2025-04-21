@@ -108,6 +108,16 @@ defmodule VintageNetQMI.Connectivity do
     {:ok, state}
   end
 
+  @spec get_serving_system(VintageNet.ifname()) :: map()
+  def get_serving_system(ifname) do
+    GenServer.call(name(ifname), :get_serving_system)
+  end
+
+  @impl GenServer
+  def handle_call(:get_serving_system, _from, state) do
+    {:reply, state, state}
+  end
+
   @impl GenServer
   def handle_cast({:serving_system_change, serving_system}, state) do
     new_state =
