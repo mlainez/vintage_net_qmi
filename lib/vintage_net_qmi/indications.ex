@@ -27,6 +27,7 @@ defmodule VintageNetQMI.Indications do
   """
   @spec handle(VintageNet.ifname(), map()) :: :ok
   def handle(ifname, indication) do
+    Logger.info("QMI Indication received on #{inspect(ifname)}: #{inspect(indication, pretty: true)}")
     GenServer.cast(name(ifname), {:indication, indication})
   end
 
