@@ -32,6 +32,10 @@ defmodule VintageNetQMI do
   * `:service_providers` (required) - a list of service provider information
   * `:only_radio_technologies` (optional) - e.g., `[:lte]`
   * `:device_path` (optional) - path to the QMI device
+  * `:ip_method` (optional) - how to obtain the IP address. Defaults to `:dhcp`.
+    Set to `:qmi_profile` to fetch IP settings directly from the modem's QMI
+    wireless data service instead of running a DHCP client. This is needed for
+    modems that don't support DHCP (e.g., Qualcomm MSM8974).
   * `:provision_uim` (optional) - when `true`, explicitly provisions a UIM
     session and sets the modem to online mode at startup. Required for modems
     that need manual SIM session provisioning (e.g., Qualcomm MSM8974).
@@ -132,6 +136,7 @@ defmodule VintageNetQMI do
     qmi_opts = normalized_config.vintage_net_qmi
     radio_technologies_preference = qmi_opts[:only_radio_technologies]
     device_path = qmi_opts[:device_path]
+    ip_method = qmi_opts[:ip_method] || :dhcp
     provision_uim? = qmi_opts[:provision_uim] || false
 
     up_cmds = [
@@ -156,16 +161,14 @@ defmodule VintageNetQMI do
            service_providers: qmi_opts.service_providers,
            radio_technologies: radio_technologies_preference
          ]},
+        if(ip_method == :qmi_profile, do: {VintageNetQMI.IPManager, ifname: ifname}),
         {VintageNetQMI.CellMonitor, [ifname: ifname]},
         {VintageNetQMI.SignalMonitor, [ifname: ifname]},
         {VintageNetQMI.ModemInfo, ifname: ifname}
       ]
       |> Enum.reject(&is_nil/1)
 
-    # QMI uses DHCP to report IP addresses, gateway, DNS, etc.
-    ipv4_config = %{ipv4: %{method: :dhcp}, hostname: Map.get(config, :hostname)}
-
-    config =
+    raw =
       %RawConfig{
         ifname: ifname,
         type: __MODULE__,
@@ -174,10 +177,24 @@ defmodule VintageNetQMI do
         up_cmds: up_cmds,
         child_specs: child_specs
       }
-      |> IPv4Config.add_config(ipv4_config, [])
-      |> remove_connectivity_detector()
 
-    config
+    raw =
+      case ip_method do
+        :qmi_profile ->
+          # IP will be configured by IPManager from QMI profile settings.
+          # No DHCP client needed.
+          raw
+
+        _dhcp ->
+          ipv4_config = %{
+            ipv4: %{method: :dhcp},
+            hostname: Map.get(config, :hostname)
+          }
+
+          IPv4Config.add_config(raw, ipv4_config, [])
+      end
+
+    raw |> remove_connectivity_detector()
   end
 
   defp remove_connectivity_detector(raw_config) do
