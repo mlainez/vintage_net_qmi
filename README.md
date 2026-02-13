@@ -131,6 +131,50 @@ VintageNet.configure("wwan0", %{
     })
 ```
 
+## Configure authentication and PDP type
+
+VintageNetQMI now supports additional service provider configuration options
+for authentication and PDP (Packet Data Protocol) type. These settings allow
+you to configure username/password authentication and specify the IP protocol
+version to use:
+
+```elixir
+VintageNet.configure("wwan0", %{
+      type: VintageNetQMI,
+      vintage_net_qmi: %{
+        service_providers: [
+          %{
+            apn: "internet.provider.com",
+            username: "user@provider.com",
+            password: "secret_password",
+            auth_method: :pap_or_chap,
+            pdp_type: :ipv4v6,
+            roaming_allowed?: false
+          }
+        ]
+      }
+    })
+```
+
+### Available authentication methods
+
+* `:none` - No authentication (default)
+* `:pap` - Password Authentication Protocol
+* `:chap` - Challenge Handshake Authentication Protocol
+* `:pap_or_chap` - Allow either PAP or CHAP
+
+### Available PDP types
+
+* `:ipv4` - IPv4 only (default)
+* `:ipv6` - IPv6 only
+* `:ipv4v6` - Dual stack IPv4 and IPv6
+* `:ppp` - Point-to-Point Protocol
+
+Note: The `:username`, `:password`, `:auth_method`, and `:pdp_type` fields are
+all optional. If `:username` and `:password` are provided but `:auth_method`
+is not specified, it defaults to `:pap_or_chap`. If authentication credentials
+are not needed, you can omit these fields entirely.
+
 ## VintageNet Properties
 
 In addition to the common `vintage_net` properties for all interface types, this

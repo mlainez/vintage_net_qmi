@@ -231,6 +231,55 @@ defmodule VintageNetQMI do
     end
   end
 
+  @doc """
+  Configure a cellular modem with extended options
+
+  This function allows you to quickly configure a cellular modem with
+  authentication credentials and PDP type settings.
+
+  ## Examples
+
+      # Basic APN configuration
+      VintageNetQMI.quick_configure_with_auth("internet.provider.com")
+
+      # With username and password
+      VintageNetQMI.quick_configure_with_auth("internet.provider.com",
+        username: "user@provider.com",
+        password: "secret")
+
+      # With full configuration
+      VintageNetQMI.quick_configure_with_auth("internet.provider.com",
+        username: "user@provider.com",
+        password: "secret",
+        auth_method: :pap_or_chap,
+        pdp_type: :ipv4v6,
+        roaming_allowed?: false)
+
+  ## Options
+
+  * `:username` - Authentication username (optional)
+  * `:password` - Authentication password (optional)
+  * `:auth_method` - Authentication method: `:none`, `:pap`, `:chap`, `:pap_or_chap` (optional)
+  * `:pdp_type` - PDP type: `:ipv4`, `:ipv6`, `:ipv4v6`, `:ppp` (optional)
+  * `:roaming_allowed?` - Whether roaming is allowed (optional)
+  """
+  @spec quick_configure_with_auth(String.t(), keyword()) :: :ok | {:error, term()}
+  def quick_configure_with_auth(apn, opts \\ []) do
+    provider_config =
+      opts
+      |> Keyword.put(:apn, apn)
+      |> Enum.into(%{})
+
+    config = %{
+      type: __MODULE__,
+      vintage_net_qmi: %{
+        service_providers: [provider_config]
+      }
+    }
+
+    VintageNet.configure("wwan0", config)
+  end
+
   # For unit test purposes
   @doc false
   @spec indication_callback(VintageNet.ifname()) :: function()
