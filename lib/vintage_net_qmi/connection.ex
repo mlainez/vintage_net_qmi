@@ -225,7 +225,9 @@ defmodule VintageNetQMI.Connection do
 
       {:error, reason} ->
         Logger.warning(
-          "[VintageNetQMI]: could not connect for #{inspect(reason)}. Retrying in #{inspect(state.connect_retry_interval)} ms."
+          "[VintageNetQMI]: could not connect for #{inspect(reason)}. " <>
+            "Check QMI.Driver logs for verbose call end reason. " <>
+            "Retrying in #{inspect(state.connect_retry_interval)} ms."
         )
 
         start_try_to_connect_timer(state)
