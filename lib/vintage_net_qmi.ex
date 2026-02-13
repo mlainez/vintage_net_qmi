@@ -27,9 +27,15 @@ defmodule VintageNetQMI do
   )
   ```
 
-  The following keys are supported
+  The following keys are supported in the `:vintage_net_qmi` map:
 
-  * `:service_providers` - This is a list of service provider information
+  * `:service_providers` (required) - a list of service provider information
+  * `:only_radio_technologies` (optional) - e.g., `[:lte]`
+  * `:device_path` (optional) - path to the QMI device
+  * `:provision_uim` (optional) - when `true`, explicitly provisions a UIM
+    session and sets the modem to online mode at startup. Required for modems
+    that need manual SIM session provisioning (e.g., Qualcomm MSM8974).
+    Defaults to `false`.
 
   The `:service_providers` key should be set to information provided by each of
   your service providers.
@@ -83,10 +89,9 @@ defmodule VintageNetQMI do
             {field, to_string(field)}
           end
 
-        new_config = %{
-          config
-          | vintage_net_qmi: Map.put(qmi, :service_providers, [service_provider])
-        }
+        new_qmi = Map.put(qmi, :service_providers, [service_provider])
+
+        new_config = %{config | vintage_net_qmi: new_qmi}
 
         raise ArgumentError,
               """
@@ -119,31 +124,38 @@ defmodule VintageNetQMI do
         _opts
       ) do
     normalized_config = normalize(config)
-    radio_technologies_preference = normalized_config.vintage_net_qmi[:only_radio_technologies]
+    qmi_opts = normalized_config.vintage_net_qmi
+    radio_technologies_preference = qmi_opts[:only_radio_technologies]
+    device_path = qmi_opts[:device_path]
+    provision_uim? = qmi_opts[:provision_uim] || false
 
     up_cmds = [
       {:fun, QMI, :configure_linux, [ifname]}
     ]
 
-    child_specs = [
-      {VintageNetQMI.Indications, ifname: ifname},
-      {QMI.Supervisor,
-       [
-         ifname: ifname,
-         name: qmi_name(ifname),
-         indication_callback: indication_callback(ifname)
-       ]},
-      {VintageNetQMI.Connectivity, ifname: ifname},
-      {VintageNetQMI.Connection,
-       [
-         ifname: ifname,
-         service_providers: normalized_config.vintage_net_qmi.service_providers,
-         radio_technologies: radio_technologies_preference
-       ]},
-      {VintageNetQMI.CellMonitor, [ifname: ifname]},
-      {VintageNetQMI.SignalMonitor, [ifname: ifname]},
-      {VintageNetQMI.ModemInfo, ifname: ifname}
-    ]
+    child_specs =
+      [
+        {VintageNetQMI.Indications, ifname: ifname},
+        {QMI.Supervisor,
+         [
+           ifname: ifname,
+           device_path: device_path,
+           name: qmi_name(ifname),
+           indication_callback: indication_callback(ifname)
+         ]},
+        if(provision_uim?, do: {VintageNetQMI.SessionProvisioning, ifname: ifname}),
+        {VintageNetQMI.Connectivity, ifname: ifname},
+        {VintageNetQMI.Connection,
+         [
+           ifname: ifname,
+           service_providers: qmi_opts.service_providers,
+           radio_technologies: radio_technologies_preference
+         ]},
+        {VintageNetQMI.CellMonitor, [ifname: ifname]},
+        {VintageNetQMI.SignalMonitor, [ifname: ifname]},
+        {VintageNetQMI.ModemInfo, ifname: ifname}
+      ]
+      |> Enum.reject(&is_nil/1)
 
     # QMI uses DHCP to report IP addresses, gateway, DNS, etc.
     ipv4_config = %{ipv4: %{method: :dhcp}, hostname: Map.get(config, :hostname)}
