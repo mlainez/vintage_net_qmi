@@ -80,4 +80,34 @@ defmodule VintageNetQMI.ServiceProviderTest do
                ServiceProvider.select_provider_by_iccid(providers, iccid)
     end
   end
+
+  describe "Provider configuration with extended fields" do
+    test "provider with authentication settings is valid" do
+      provider = %{
+        apn: "internet.provider.com",
+        username: "user@provider.com",
+        password: "secret",
+        auth_method: :pap_or_chap,
+        pdp_type: :ipv4v6,
+        roaming_allowed?: false
+      }
+
+      iccid = "891004234814455936F"
+
+      # Should work the same as before even with the new fields
+      assert {:ok, provider} == ServiceProvider.select_provider_by_iccid([provider], iccid)
+    end
+
+    test "provider with partial authentication settings" do
+      provider = %{
+        apn: "internet.provider.com",
+        username: "user@provider.com",
+        pdp_type: :ipv4
+      }
+
+      iccid = "891004234814455936F"
+
+      assert {:ok, provider} == ServiceProvider.select_provider_by_iccid([provider], iccid)
+    end
+  end
 end
