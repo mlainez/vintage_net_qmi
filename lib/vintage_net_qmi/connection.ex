@@ -10,7 +10,8 @@ defmodule VintageNetQMI.Connection do
 
   use GenServer
 
-  alias QMI.{NetworkAccess, WirelessData}
+  alias QMI.{NetworkAccess, WirelessData, WirelessDataAdmin}
+  alias QMI.Codec.WirelessData, as: WirelessDataCodec
   alias VintageNetQMI.Connection.Configuration
   alias VintageNetQMI.ServiceProvider
 
@@ -21,7 +22,13 @@ defmodule VintageNetQMI.Connection do
   @typedoc """
   Options for to establish the connection
 
-  `:apn` - The Access Point Name of the service provider
+  `:service_provider` - The service provider configuration containing:
+    - `:apn` - The Access Point Name of the service provider
+    - `:username` - Optional username for authentication
+    - `:password` - Optional password for authentication
+    - `:pdp_type` - Optional PDP type (:ipv4, :ppp, :ipv6, :ipv4v6)
+    - `:auth_method` - Optional authentication method (:none, :pap, :chap, :pap_or_chap)
+    - `:roaming_allowed?` - Optional roaming configuration
   """
   @type arg() :: {:service_provider, String.t()}
 
@@ -107,6 +114,11 @@ defmodule VintageNetQMI.Connection do
     WirelessData.set_event_report(state.qmi)
   end
 
+  defp try_run_configuration(:profile_settings_configured, _state) do
+    # This is a placeholder for future profile configuration verification
+    :ok
+  end
+
   @impl GenServer
   def handle_cast({:process_stats, stats}, state) do
     timestamp = System.monotonic_time()
@@ -155,13 +167,13 @@ defmodule VintageNetQMI.Connection do
     with :ok <- validate_iccid(iccid),
          {:ok, provider} <- ServiceProvider.select_provider_by_iccid(providers, iccid),
          PropertyTable.put(VintageNet, mobile_prop(state.ifname, "apn"), provider.apn),
-         :ok <- set_roaming_allowed_for_provider(provider, three_3gpp_profile_index, state),
+         :ok <- configure_profile_for_provider(provider, three_3gpp_profile_index, state),
          {:ok, _} <-
            WirelessData.start_network_interface(state.qmi,
              apn: provider.apn,
              profile_3gpp_index: three_3gpp_profile_index
            ) do
-      Logger.info("[VintageNetQMI]: network started. Waiting on DHCP")
+      Logger.info("[VintageNetQMI]: network started, waiting for IP configuration")
       state
     else
       {:error, :no_provider} ->
@@ -195,30 +207,97 @@ defmodule VintageNetQMI.Connection do
   defp validate_iccid(iccid) when is_binary(iccid), do: :ok
   defp validate_iccid(_iccid), do: {:error, :invalid_iccid}
 
-  defp set_roaming_allowed_for_provider(
-         %{roaming_allowed?: roaming_allowed?},
-         profile_index,
-         state
-       ) do
-    case WirelessData.modify_profile_settings(state.qmi, profile_index,
-           # We have to set the opposite of what was passed in because QMI
-           # configures if roaming is disallowed whereas our public
-           # configuration API configures if roaming is allowed.
-           roaming_disallowed: !roaming_allowed?
-         ) do
+  defp configure_profile_for_provider(provider, profile_index, state) do
+    profile_settings = build_profile_settings(provider)
+
+    case WirelessData.modify_profile_settings(state.qmi, profile_index, profile_settings) do
       {:ok, %{extended_error_code: nil}} ->
         :ok
 
       {:ok, has_error} ->
+        Logger.warning(
+          "[VintageNetQMI] Profile configuration returned error: #{inspect(has_error)}"
+        )
+
         {:error, has_error}
 
       error ->
+        Logger.warning("[VintageNetQMI] Failed to configure profile: #{inspect(error)}")
         error
     end
   end
 
-  defp set_roaming_allowed_for_provider(_, _, _) do
-    :ok
+  defp build_profile_settings(provider) do
+    base_settings = []
+
+    # Add roaming configuration (keep the inverted logic for compatibility)
+    roaming_settings =
+      case Map.get(provider, :roaming_allowed?) do
+        nil -> []
+        roaming_allowed? -> [roaming_disallowed: !roaming_allowed?]
+      end
+
+    # Add APN (always required)
+    apn_settings = [apn: provider.apn]
+
+    # Add optional authentication settings
+    auth_settings =
+      [
+        Map.get(provider, :username),
+        Map.get(provider, :password),
+        Map.get(provider, :auth_method)
+      ]
+      |> case do
+        [username, password, auth_method] when is_binary(username) and is_binary(password) ->
+          auth_method = auth_method || :pap_or_chap
+          [username: username, password: password, auth_method: auth_method]
+
+        [username, nil, _] when is_binary(username) ->
+          [username: username, auth_method: Map.get(provider, :auth_method) || :none]
+
+        [nil, password, _] when is_binary(password) ->
+          [password: password, auth_method: Map.get(provider, :auth_method) || :none]
+
+        _ ->
+          case Map.get(provider, :auth_method) do
+            nil -> []
+            auth_method -> [auth_method: auth_method]
+          end
+      end
+
+    # Add PDP type if specified
+    pdp_settings =
+      case Map.get(provider, :pdp_type) do
+        nil -> []
+        pdp_type -> [pdp_type: pdp_type]
+      end
+
+    base_settings ++ roaming_settings ++ apn_settings ++ auth_settings ++ pdp_settings
+  end
+
+  @doc """
+  Get current profile settings for debugging purposes
+
+  This function can be called to retrieve the current configuration
+  of a profile for debugging or verification purposes.
+  """
+  @spec get_profile_settings(VintageNet.ifname(), integer()) ::
+          {:ok, WirelessDataCodec.profile_settings()} | {:error, atom()}
+  def get_profile_settings(ifname, profile_index \\ 1) do
+    qmi_name = VintageNetQMI.qmi_name(ifname)
+    WirelessData.get_profile_settings(qmi_name, profile_index, :profile_type_3gpp)
+  end
+
+  @doc """
+  Get current connection settings for debugging purposes
+
+  This function retrieves current connection settings including MTU information.
+  """
+  @spec get_current_settings(VintageNet.ifname(), 4 | 6, keyword()) ::
+          {:ok, WirelessDataCodec.current_settings()} | {:error, atom()}
+  def get_current_settings(ifname, ip_family \\ 4, opts \\ []) do
+    qmi_name = VintageNetQMI.qmi_name(ifname)
+    WirelessData.get_current_settings(qmi_name, ip_family, opts)
   end
 
   defp maybe_start_try_to_connect_timer(%{iccid: nil} = state), do: state
