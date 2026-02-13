@@ -10,6 +10,9 @@ defmodule VintageNetQMI.Connectivity do
 
   alias VintageNet.PowerManager.PMControl
   alias VintageNet.RouteManager
+  alias VintageNetQMI.CallEndReason
+
+  require Logger
 
   # Serving system reports say which cell ID we're connected to
   # and various statuses. Moving between cell IDs causes the status
@@ -144,6 +147,8 @@ defmodule VintageNetQMI.Connectivity do
       connection_status.status
     )
 
+    publish_call_end_reason(state.ifname, connection_status)
+
     {:noreply, new_state}
   end
 
@@ -162,6 +167,24 @@ defmodule VintageNetQMI.Connectivity do
 
     PropertyTable.put_many(VintageNet, properties)
     state
+  end
+
+  defp publish_call_end_reason(ifname, connection_status) do
+    reason_type = Map.get(connection_status, :call_end_reason_type)
+    reason_code = Map.get(connection_status, :call_end_reason)
+
+    if reason_type != nil and reason_code != nil do
+      description = CallEndReason.format(reason_type, reason_code)
+
+      PropertyTable.put_many(VintageNet, [
+        {["interface", ifname, "mobile", "call_end_reason"],
+         %{type: reason_type, code: reason_code, description: description}}
+      ])
+
+      if connection_status.status != :connected do
+        Logger.warning("[VintageNetQMI] Disconnect reason: #{description}")
+      end
+    end
   end
 
   defp maybe_time_location_property(serving_system, field, state) do
