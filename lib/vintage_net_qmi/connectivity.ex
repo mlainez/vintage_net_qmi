@@ -108,6 +108,16 @@ defmodule VintageNetQMI.Connectivity do
     {:ok, state}
   end
 
+  @spec get_serving_system(VintageNet.ifname()) :: map()
+  def get_serving_system(ifname) do
+    GenServer.call(name(ifname), :get_serving_system)
+  end
+
+  @impl GenServer
+  def handle_call(:get_serving_system, _from, state) do
+    {:reply, state, state}
+  end
+
   @impl GenServer
   def handle_cast({:serving_system_change, serving_system}, state) do
     new_state =
@@ -115,15 +125,24 @@ defmodule VintageNetQMI.Connectivity do
       |> update_derived_status()
       |> update_connection_status()
       |> update_time_location_properties()
+      |> publish_registration_state()
 
     {:noreply, new_state}
   end
 
   def handle_cast({:connection_status_change, connection_status}, state) do
+    connected? = connection_status.status == :connected
+
     new_state =
-      %{state | packet_data_connection?: connection_status.status == :connected}
+      %{state | packet_data_connection?: connected?, lan?: state.lan? or connected?}
       |> update_derived_status()
       |> update_connection_status()
+
+    PropertyTable.put(
+      VintageNet,
+      ["interface", state.ifname, "qmi_connection_status"],
+      connection_status.status
+    )
 
     {:noreply, new_state}
   end
@@ -308,6 +327,18 @@ defmodule VintageNetQMI.Connectivity do
   end
 
   defp update_connection_status(state), do: state
+
+  defp publish_registration_state(state) do
+    registration_state = state.serving_system[:serving_system_registration_state] || :unregistered
+
+    PropertyTable.put(
+      VintageNet,
+      ["interface", state.ifname, "mobile", "registration_state"],
+      registration_state
+    )
+
+    state
+  end
 
   defp has_ipv4_address?(nil), do: false
 

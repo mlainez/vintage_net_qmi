@@ -17,7 +17,8 @@ defmodule VintageNetQMI.Connection do
 
   require Logger
 
-  @configuration_retry 30_000
+  @configuration_retry 60_000
+  @start_network_timeout 30_000
 
   @typedoc """
   Options for to establish the connection
@@ -67,12 +68,17 @@ defmodule VintageNetQMI.Connection do
     VintageNet.subscribe(iccid_property)
     iccid = VintageNet.get(iccid_property)
 
+    registration_property = mobile_prop(ifname, "registration_state")
+    VintageNet.subscribe(registration_property)
+    registration_state = VintageNet.get(registration_property) || :unregistered
+
     state =
       %{
         ifname: ifname,
         qmi: VintageNetQMI.qmi_name(ifname),
         service_providers: providers,
         iccid: iccid,
+        registration_state: registration_state,
         connect_retry_interval: 30_000,
         radio_technologies: radio_technologies,
         configuration: Configuration.new()
@@ -140,12 +146,27 @@ defmodule VintageNetQMI.Connection do
     {:noreply, try_to_connect(new_state)}
   end
 
+  def handle_info(
+        {VintageNet, ["interface", ifname, "mobile", "registration_state"], _, new_reg_state,
+         _meta},
+        %{ifname: ifname} = state
+      ) do
+    new_state = %{state | registration_state: new_reg_state}
+
+    if new_reg_state == :registered do
+      Logger.info("[VintageNetQMI] Modem registered on network, attempting to connect")
+      {:noreply, try_to_connect(new_state)}
+    else
+      {:noreply, new_state}
+    end
+  end
+
   def handle_info(:try_to_configure, state) do
     new_state = try_to_configure_modem(state)
 
     _ =
       if Configuration.completely_configured?(new_state.configuration) do
-        Process.send_after(self(), :try_to_connect, 1_000)
+        Process.send_after(self(), :try_to_connect, 10_000)
       end
 
     {:noreply, new_state}
@@ -159,6 +180,11 @@ defmodule VintageNetQMI.Connection do
     {:noreply, state}
   end
 
+  defp try_to_connect(%{registration_state: reg} = state)
+       when reg != :registered do
+    state
+  end
+
   defp try_to_connect(state) do
     three_3gpp_profile_index = 1
     iccid = state.iccid
@@ -168,10 +194,12 @@ defmodule VintageNetQMI.Connection do
          {:ok, provider} <- ServiceProvider.select_provider_by_iccid(providers, iccid),
          PropertyTable.put(VintageNet, mobile_prop(state.ifname, "apn"), provider.apn),
          :ok <- configure_profile_for_provider(provider, three_3gpp_profile_index, state),
+         :ok <- ensure_data_format(state),
          {:ok, _} <-
            WirelessData.start_network_interface(state.qmi,
              apn: provider.apn,
-             profile_3gpp_index: three_3gpp_profile_index
+             profile_3gpp_index: three_3gpp_profile_index,
+             timeout: @start_network_timeout
            ) do
       Logger.info("[VintageNetQMI]: network started, waiting for IP configuration")
       state
@@ -206,6 +234,33 @@ defmodule VintageNetQMI.Connection do
 
   defp validate_iccid(iccid) when is_binary(iccid), do: :ok
   defp validate_iccid(_iccid), do: {:error, :invalid_iccid}
+
+  defp ensure_data_format(state) do
+    # If the driver has a sysfs raw_ip knob, QMI.configure_linux/1 already
+    # handled it.  Otherwise, use the WDA service to tell the modem to send
+    # raw-IP packets so they match the ARPHRD_NONE / ARPHRD_RAWIP driver.
+    sysfs_path = "/sys/class/net/#{state.ifname}/qmi/raw_ip"
+
+    if File.exists?(sysfs_path) do
+      :ok
+    else
+      case WirelessDataAdmin.set_data_format(state.qmi,
+             link_layer_protocol: :raw_ip,
+             ul_aggregation_protocol: :disabled,
+             dl_aggregation_protocol: :disabled,
+             qos_format: false
+           ) do
+        {:ok, _result} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("[VintageNetQMI] WDA Set Data Format failed: #{inspect(reason)}")
+          # Don't block connection — the modem may not support WDA, or may
+          # already be in the correct mode.
+          :ok
+      end
+    end
+  end
 
   defp configure_profile_for_provider(provider, profile_index, state) do
     profile_settings = build_profile_settings(provider)
