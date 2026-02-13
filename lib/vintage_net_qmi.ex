@@ -46,6 +46,11 @@ defmodule VintageNetQMI do
   * `:apn` (required) - e.g., `"access_point_name"`
   * `:only_iccid_prefixes` (optional) - only use this APN if the one of the strings
     in the list is a prefix of the ICCID. E.g, `["1234"]`
+  * `:username` (optional) - authentication username, e.g., `"user@provider.com"`
+  * `:password` (optional) - authentication password
+  * `:auth_method` (optional) - authentication method: `:none`, `:pap`, `:chap`, `:pap_or_chap`
+  * `:pdp_type` (optional) - PDP type: `:ipv4`, `:ipv6`, `:ipv4v6`, `:ppp`
+  * `:roaming_allowed?` (optional) - whether roaming is allowed
 
   When multiple entries are specified, the first allowed service provider is used.
 

@@ -18,11 +18,19 @@ defmodule VintageNetQMI.ServiceProvider do
     will not be checked.
   * `:roaming_allowed?` - set if the modem is allowed to use roaming. By default
     this will used the modem's provided roaming configuration.
+  * `:username` - the username for authentication (optional)
+  * `:password` - the password for authentication (optional)
+  * `:pdp_type` - the PDP (Packet Data Protocol) type (optional, defaults to :ipv4)
+  * `:auth_method` - the authentication method (optional, defaults to :none)
   """
   @type t() :: %{
           required(:apn) => binary(),
           optional(:only_iccid_prefixes) => [binary()],
-          optional(:roaming_allowed?) => boolean()
+          optional(:roaming_allowed?) => boolean(),
+          optional(:username) => binary(),
+          optional(:password) => binary(),
+          optional(:pdp_type) => :ipv4 | :ppp | :ipv6 | :ipv4v6,
+          optional(:auth_method) => :none | :pap | :chap | :pap_or_chap
         }
 
   @doc """
