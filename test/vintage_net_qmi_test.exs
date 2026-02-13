@@ -6,6 +6,7 @@
 #
 defmodule VintageNetQMITest do
   use ExUnit.Case
+  import Mock
   alias VintageNet.Interface.RawConfig
 
   test "create a simple qmi configuration" do
@@ -25,6 +26,7 @@ defmodule VintageNetQMITest do
         {QMI.Supervisor,
          [
            ifname: "wwan0",
+           device_path: nil,
            name: :"Elixir.VintageNetQMI.QMI.wwan0",
            indication_callback: VintageNetQMI.indication_callback("wwan0")
          ]},
@@ -49,5 +51,56 @@ defmodule VintageNetQMITest do
     created = VintageNetQMI.to_raw_config("wwan0", input, Utils.default_opts())
 
     assert created == expected
+  end
+
+  test "quick_configure_with_auth creates proper configuration" do
+    # Mock VintageNet.configure to capture the call
+    pid = self()
+
+    config_capture = fn ifname, config ->
+      send(pid, {:configure_called, ifname, config})
+      :ok
+    end
+
+    # Test with minimal options
+    with_mock VintageNet, configure: config_capture do
+      VintageNetQMI.quick_configure_with_auth("test.apn")
+
+      assert_received {:configure_called, "wwan0",
+                       %{
+                         type: VintageNetQMI,
+                         vintage_net_qmi: %{
+                           service_providers: [%{apn: "test.apn"}]
+                         }
+                       }}
+    end
+
+    # Test with full options
+    with_mock VintageNet, configure: config_capture do
+      VintageNetQMI.quick_configure_with_auth("test.apn",
+        username: "testuser",
+        password: "testpass",
+        auth_method: :pap_or_chap,
+        pdp_type: :ipv4v6,
+        roaming_allowed?: false
+      )
+
+      assert_received {:configure_called, "wwan0",
+                       %{
+                         type: VintageNetQMI,
+                         vintage_net_qmi: %{
+                           service_providers: [
+                             %{
+                               apn: "test.apn",
+                               username: "testuser",
+                               password: "testpass",
+                               auth_method: :pap_or_chap,
+                               pdp_type: :ipv4v6,
+                               roaming_allowed?: false
+                             }
+                           ]
+                         }
+                       }}
+    end
   end
 end
