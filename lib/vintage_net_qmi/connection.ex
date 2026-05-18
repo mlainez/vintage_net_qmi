@@ -10,7 +10,7 @@ defmodule VintageNetQMI.Connection do
 
   use GenServer
 
-  alias QMI.{NetworkAccess, WirelessData, WirelessDataAdmin}
+  alias QMI.{DataPortMapper, NetworkAccess, WirelessData, WirelessDataAdmin}
   alias QMI.Codec.WirelessData, as: WirelessDataCodec
   alias VintageNetQMI.Connection.Configuration
   alias VintageNetQMI.ServiceProvider
@@ -63,6 +63,9 @@ defmodule VintageNetQMI.Connection do
     ifname = Keyword.fetch!(args, :ifname)
     providers = Keyword.fetch!(args, :service_providers)
     radio_technologies = Keyword.get(args, :radio_technologies)
+    transport = Keyword.get(args, :transport, :qmux)
+    rmnet_child = Keyword.get(args, :rmnet_child)
+    qmap_mux_id = (rmnet_child && rmnet_child[:mux_id]) || 0x81
 
     iccid_property = mobile_prop(ifname, "iccid")
     VintageNet.subscribe(iccid_property)
@@ -81,12 +84,33 @@ defmodule VintageNetQMI.Connection do
         registration_state: registration_state,
         connect_retry_interval: 30_000,
         radio_technologies: radio_technologies,
+        transport: transport,
+        qmap_mux_id: qmap_mux_id,
         configuration: Configuration.new()
       }
       |> try_to_configure_modem()
       |> maybe_start_try_to_connect_timer()
 
+    bootstrap_serving_system(state)
+
     {:ok, state}
+  end
+
+  # The modem typically emits its first `serving_system_indication`
+  # very early in its own boot, often before our `Indications`
+  # GenServer is alive to receive it. After that the modem only
+  # re-emits on state changes, so without this bootstrap call
+  # `registration_state` would stay `nil` even though the modem is
+  # already attached to the network. Query NAS once on init and feed
+  # the result into `Connectivity` as if it were a fresh indication.
+  defp bootstrap_serving_system(state) do
+    case NetworkAccess.get_serving_system(state.qmi) do
+      {:ok, serving_system} ->
+        VintageNetQMI.Connectivity.serving_system_change(state.ifname, serving_system)
+
+      {:error, _reason} ->
+        :ok
+    end
   end
 
   defp try_to_configure_modem(state) do
@@ -194,11 +218,15 @@ defmodule VintageNetQMI.Connection do
          {:ok, provider} <- ServiceProvider.select_provider_by_iccid(providers, iccid),
          PropertyTable.put(VintageNet, mobile_prop(state.ifname, "apn"), provider.apn),
          :ok <- configure_profile_for_provider(provider, three_3gpp_profile_index, state),
+         :ok <- ensure_dpm_open_port(state),
          :ok <- ensure_data_format(state),
+         :ok <- ensure_qrtr_data_binding(state),
          {:ok, _} <-
            WirelessData.start_network_interface(state.qmi,
+             # ModemManager sends EITHER profile_index_3gpp OR (apn + auth);
+             # never both. Sending both confuses the modem firmware and
+             # makes WDS Start Network return :call_failed (3GPP verbose 29).
              apn: provider.apn,
-             profile_3gpp_index: three_3gpp_profile_index,
              timeout: @start_network_timeout
            ) do
       Logger.info("[VintageNetQMI]: network started, waiting for IP configuration")
@@ -246,12 +274,40 @@ defmodule VintageNetQMI.Connection do
     if File.exists?(sysfs_path) do
       :ok
     else
-      case WirelessDataAdmin.set_data_format(state.qmi,
-             link_layer_protocol: :raw_ip,
-             ul_aggregation_protocol: :disabled,
-             dl_aggregation_protocol: :disabled,
-             qos_format: false
-           ) do
+      # On QRTR-backed in-kernel modems (msm8953/sdm632, FP3+) the data
+      # endpoint is the embedded IPA-backed link, not an HSUSB port,
+      # and the modem must agree with the kernel rmnet child on the
+      # QMAP wire format. MM picks the aggregation protocol from the
+      # rmnet child's `feature/{rx,tx}_offload` sysfs entries; the
+      # `ipa2-lite` driver doesn't expose `feature/`, so MM and we both
+      # use QMAPv1 (libqmi `QMI_WDA_DATA_AGGREGATION_PROTOCOL_QMAP =
+      # 0x05`) with the rmnet child set to `INGRESS_DEAGGREGATION` only.
+      # Mismatch with `:qmap_v5` makes `rmnet_map_deaggregate` drop
+      # every downlink frame because it doesn't strip the v5 csum
+      # header — rmnet0 RX stays at zero forever.
+      # MM also doesn't send TLV 0x10 (qos_format) — omit it to match.
+      opts =
+        case state.transport do
+          :qrtr ->
+            [
+              link_layer_protocol: :raw_ip,
+              ul_aggregation_protocol: :qmap,
+              dl_aggregation_protocol: :qmap,
+              dl_max_datagrams: 32,
+              dl_max_size: 32_768,
+              endpoint_type: 4,
+              endpoint_iface_number: 1
+            ]
+
+          _ ->
+            [
+              link_layer_protocol: :raw_ip,
+              ul_aggregation_protocol: :disabled,
+              dl_aggregation_protocol: :disabled
+            ]
+        end
+
+      case WirelessDataAdmin.set_data_format(state.qmi, opts) do
         {:ok, _result} ->
           :ok
 
@@ -262,6 +318,110 @@ defmodule VintageNetQMI.Connection do
           :ok
       end
     end
+  end
+
+  # On QRTR-backed in-kernel modems with an IPA hardware data path
+  # (msm8953/sdm632), the modem firmware refuses every subsequent
+  # `WDS`/`WDA` data-plane call until the AP has registered its
+  # hardware data port with the modem via DPM `Open Port`. The
+  # endpoint id pair is the IPA driver's modem-side RX/TX endpoint
+  # ids, exposed under `/sys/devices/platform/.../ipa/modem/{rx,tx}_endpoint_id`.
+  # We attempt to read those from sysfs and fall back to (5, 4),
+  # which is what `ipa2-lite` reports on msm8953.
+  defp ensure_dpm_open_port(%{transport: :qrtr} = state) do
+    {ap_rx, ap_tx} = ipa_endpoint_ids()
+    # IMPORTANT: DPM Open Port expects modem-side endpoint perspective.
+    # sysfs `rx_endpoint_id`/`tx_endpoint_id` is AP-side. The modem's RX is
+    # the AP's TX and vice-versa, so we pass them swapped (matching MM's
+    # mm-port-qmi.c::dpm_open_port). Without the swap the modem firmware
+    # sets up the IPA pipes in the wrong direction and TX from the AP
+    # never reaches the modem's WDS data plane.
+    modem_rx = ap_tx
+    modem_tx = ap_rx
+
+    case DataPortMapper.open_hardware_port(state.qmi, 4, 1, modem_rx, modem_tx) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "[VintageNetQMI] DPM Open Port returned #{inspect(reason)} — continuing"
+        )
+
+        :ok
+    end
+  end
+
+  defp ensure_dpm_open_port(_state), do: :ok
+
+  defp ipa_endpoint_ids do
+    case Path.wildcard("/sys/devices/platform/*/*.ipa/modem") do
+      [path | _] ->
+        {read_int!(path, "rx_endpoint_id", 5), read_int!(path, "tx_endpoint_id", 4)}
+
+      _ ->
+        {5, 4}
+    end
+  end
+
+  defp read_int!(dir, file, default) do
+    case File.read(Path.join(dir, file)) do
+      {:ok, s} ->
+        case Integer.parse(String.trim(s)) do
+          {n, _} -> n
+          :error -> default
+        end
+
+      _ ->
+        default
+    end
+  end
+
+  # Extra WDS bring-up steps needed for in-kernel Qualcomm modems
+  # (msm8953/sdm632 — FP3+) before `start_network_interface/2` will
+  # succeed:
+  #
+  #   * Bind the WDS client to the embedded data endpoint (mux id 0x81)
+  #     so the modem knows where the rmnet/IPA path lives.
+  #   * Bind to the primary SIM subscription.
+  #   * Pin IPv4 as the IP family preference.
+  #
+  # Each step is best-effort: older firmwares may not implement
+  # `bind_subscription` (msg 0x00AF was introduced in libqmi 1.37) so a
+  # `:not_supported`/`:invalid_arg` here shouldn't block the connection
+  # attempt. Hard failures bubble up so we don't silently retry a
+  # `start_network_interface` that's guaranteed to keep failing.
+  defp ensure_qrtr_data_binding(%{transport: :qrtr} = state) do
+    # Note: ModemManager only sends Endpoint Info + Mux ID TLVs on bind_mux;
+    # it does NOT send Client Type. We match that here (omit `:client_type`).
+    # Passing `client_type: :tethered` makes the modem firmware reject the
+    # WDS Start Network that follows with `:call_failed` (verbose end reason
+    # 29) on FP3+/msm8953. See [[feedback-fp3-modem-debugging]].
+    with :ok <-
+           best_effort(
+             WirelessData.bind_mux_data_port(state.qmi,
+               endpoint_type: :embedded,
+               interface_number: 1,
+               mux_id: state.qmap_mux_id
+             ),
+             "bind_mux_data_port"
+           ),
+         :ok <- best_effort(WirelessData.bind_subscription(state.qmi, :primary), "bind_subscription"),
+         :ok <- best_effort(WirelessData.set_ip_family(state.qmi, :ipv4), "set_ip_family") do
+      :ok
+    end
+  end
+
+  defp ensure_qrtr_data_binding(_state), do: :ok
+
+  defp best_effort({:ok, _}, _step), do: :ok
+
+  defp best_effort({:error, reason}, step) do
+    Logger.warning(
+      "[VintageNetQMI] WDS #{step} returned #{inspect(reason)} — continuing"
+    )
+
+    :ok
   end
 
   defp configure_profile_for_provider(provider, profile_index, state) do

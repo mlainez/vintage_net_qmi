@@ -48,6 +48,20 @@ defmodule VintageNetQMI do
     session and sets the modem to online mode at startup. Required for modems
     that need manual SIM session provisioning (e.g., Qualcomm MSM8974).
     Defaults to `false`.
+  * `:rmnet_child` (optional) - declare that the configured `ifname` is an
+    `rmnet` upper-layer netdev that should be created over a QMAP-only base
+    IPA netdev. Required on platforms whose data path is exposed only as a
+    QMAP-protocol netdev (Citronics' `ipa2-lite` driver on msm8953/sdm632 —
+    Fairphone 3+). Map keys:
+
+      * `:parent` (required) - the underlying QMAP netdev (e.g.
+        `"rmnet_ipa0"`).
+      * `:mux_id` (required) - the QMAP mux id (1..255) used by both the
+        kernel rmnet child and the WDS `bind_mux_data_port` call.
+
+    When set, `VintageNetQMI.Application` creates the child netdev via
+    netlink before VintageNet's interface state machine activates, and the
+    WDS bring-up sequence binds the QMI client to the same mux id.
 
   The `:service_providers` key should be set to information provided by each of
   your service providers.
@@ -144,7 +158,7 @@ defmodule VintageNetQMI do
     qmi_opts = normalized_config.vintage_net_qmi
     radio_technologies_preference = qmi_opts[:only_radio_technologies]
     device_path = qmi_opts[:device_path]
-    transport = qmi_opts[:transport]
+    transport = resolve_transport(qmi_opts[:transport], device_path)
     ip_method = qmi_opts[:ip_method] || :dhcp
     provision_uim? = qmi_opts[:provision_uim] || false
 
@@ -163,14 +177,9 @@ defmodule VintageNetQMI do
         ifname: ifname,
         device_path: device_path,
         name: qmi_name(ifname),
-        indication_callback: indication_callback(ifname)
+        indication_callback: indication_callback(ifname),
+        transport: transport
       ]
-      # Only pass :transport through when the user (or detected
-      # platform) supplied one — QMI.Supervisor auto-detects when it's
-      # absent. Passing nil would override that auto-detection.
-      |> then(fn opts ->
-        if transport, do: Keyword.put(opts, :transport, transport), else: opts
-      end)
 
     child_specs =
       [
@@ -182,7 +191,9 @@ defmodule VintageNetQMI do
          [
            ifname: ifname,
            service_providers: qmi_opts.service_providers,
-           radio_technologies: radio_technologies_preference
+           radio_technologies: radio_technologies_preference,
+           transport: transport,
+           rmnet_child: qmi_opts[:rmnet_child]
          ]},
         if(ip_method == :qmi_profile, do: {VintageNetQMI.IPManager, ifname: ifname}),
         {VintageNetQMI.CellMonitor, [ifname: ifname]},
@@ -218,6 +229,24 @@ defmodule VintageNetQMI do
       end
 
     raw |> remove_connectivity_detector()
+  end
+
+  # Pick the wire transport up-front so downstream child specs all see
+  # the same concrete value. Mirrors `QMI.Supervisor.derive_transport/1`:
+  # an explicit `:transport` wins; otherwise a cdc-wdm-style
+  # `:device_path` means QMUX, anything else (including no path) means
+  # QRTR.
+  defp resolve_transport(nil, device_path), do: detect_transport(device_path)
+  defp resolve_transport(transport, _device_path), do: transport
+
+  defp detect_transport(nil), do: :qrtr
+
+  defp detect_transport(path) do
+    cond do
+      String.starts_with?(path, "/dev/cdc-wdm") -> :qmux
+      String.match?(path, ~r"^/dev/wwan\d+qmi\d+$") -> :qmux
+      true -> :qrtr
+    end
   end
 
   defp remove_connectivity_detector(raw_config) do
