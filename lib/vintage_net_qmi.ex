@@ -31,7 +31,15 @@ defmodule VintageNetQMI do
 
   * `:service_providers` (required) - a list of service provider information
   * `:only_radio_technologies` (optional) - e.g., `[:lte]`
-  * `:device_path` (optional) - path to the QMI device
+  * `:device_path` (optional) - path to the QMI device (cdc-wdm /
+    `wwan*qmi*` chardev). Only used by the `:qmux` transport.
+  * `:transport` (optional) - which QMI wire transport to use. Either
+    `:qmux` for the cdc-wdm-style chardev path (USB modems, some
+    in-kernel modems) or `:qrtr` for `AF_QIPCRTR` (in-kernel Qualcomm
+    modems whose firmware publishes QMI services on the IPC Router —
+    msm8953 / sdm632, e.g. Fairphone 3+). When omitted, the
+    transport is auto-detected from `:device_path`: a cdc-wdm-style
+    path picks `:qmux`; anything else picks `:qrtr`.
   * `:ip_method` (optional) - how to obtain the IP address. Defaults to `:dhcp`.
     Set to `:qmi_profile` to fetch IP settings directly from the modem's QMI
     wireless data service instead of running a DHCP client. This is needed for
@@ -136,23 +144,38 @@ defmodule VintageNetQMI do
     qmi_opts = normalized_config.vintage_net_qmi
     radio_technologies_preference = qmi_opts[:only_radio_technologies]
     device_path = qmi_opts[:device_path]
+    transport = qmi_opts[:transport]
     ip_method = qmi_opts[:ip_method] || :dhcp
     provision_uim? = qmi_opts[:provision_uim] || false
 
-    up_cmds = [
-      {:fun, QMI, :configure_linux, [ifname]}
-    ]
+    # QMI.configure_linux/1 only matters for cdc-wdm/wwan-chardev
+    # backed modems (it sets `qmi/raw_ip` in sysfs). In-kernel modems
+    # reached via QRTR don't expose a netdev at the same path and the
+    # call is a no-op there anyway, but skip it explicitly to keep the
+    # ifup output clean.
+    up_cmds =
+      if transport == :qrtr,
+        do: [],
+        else: [{:fun, QMI, :configure_linux, [ifname]}]
+
+    qmi_supervisor_opts =
+      [
+        ifname: ifname,
+        device_path: device_path,
+        name: qmi_name(ifname),
+        indication_callback: indication_callback(ifname)
+      ]
+      # Only pass :transport through when the user (or detected
+      # platform) supplied one — QMI.Supervisor auto-detects when it's
+      # absent. Passing nil would override that auto-detection.
+      |> then(fn opts ->
+        if transport, do: Keyword.put(opts, :transport, transport), else: opts
+      end)
 
     child_specs =
       [
         {VintageNetQMI.Indications, ifname: ifname},
-        {QMI.Supervisor,
-         [
-           ifname: ifname,
-           device_path: device_path,
-           name: qmi_name(ifname),
-           indication_callback: indication_callback(ifname)
-         ]},
+        {QMI.Supervisor, qmi_supervisor_opts},
         if(provision_uim?, do: {VintageNetQMI.SessionProvisioning, ifname: ifname}),
         {VintageNetQMI.Connectivity, ifname: ifname},
         {VintageNetQMI.Connection,
