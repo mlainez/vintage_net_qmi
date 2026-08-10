@@ -33,7 +33,7 @@ defmodule VintageNetQMI.MixProject do
   defp deps do
     [
       {:vintage_net, "~> 0.12.0 or ~> 0.13.0"},
-      {:qmi, github: "mlainez/qmi", override: true},
+      {:qmi, github: "mlainez/qmi", branch: "qrtr-transport", override: true},
       {:mock, "~> 0.3", only: :test},
       {:credo, "~> 1.5", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4.1", only: :dev, runtime: false},
