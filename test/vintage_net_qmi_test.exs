@@ -32,7 +32,13 @@ defmodule VintageNetQMITest do
          ]},
         {VintageNetQMI.Connectivity, [ifname: "wwan0"]},
         {VintageNetQMI.Connection,
-         [{:ifname, "wwan0"}, service_providers: [%{apn: "super"}], radio_technologies: nil]},
+         [
+           ifname: "wwan0",
+           service_providers: [%{apn: "super"}],
+           radio_technologies: nil,
+           initial_eps_bearer: nil,
+           profile_index: nil
+         ]},
         {VintageNetQMI.CellMonitor, [ifname: "wwan0"]},
         {VintageNetQMI.SignalMonitor, [ifname: "wwan0"]},
         {VintageNetQMI.ModemInfo, [ifname: "wwan0"]},

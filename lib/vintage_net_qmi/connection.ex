@@ -13,15 +13,16 @@ defmodule VintageNetQMI.Connection do
   alias QMI.{DeviceManagement, NetworkAccess, WirelessData, WirelessDataAdmin}
   alias QMI.Codec.WirelessData, as: WirelessDataCodec
   alias VintageNetQMI.Connection.Configuration
-  alias VintageNetQMI.LteAttach
+  alias VintageNetQMI.Profiles
   alias VintageNetQMI.ServiceProvider
 
   require Logger
 
   @configuration_retry 60_000
   @start_network_timeout 30_000
-  @default_profile_index 1
   @reattach_online_delay 2_000
+  @attach_fallback_delay 1_000
+  @pdn_already_on_apn 55
 
   @typedoc """
   Options for to establish the connection
@@ -66,6 +67,8 @@ defmodule VintageNetQMI.Connection do
     ifname = Keyword.fetch!(args, :ifname)
     providers = Keyword.fetch!(args, :service_providers)
     radio_technologies = Keyword.get(args, :radio_technologies)
+    initial_eps_bearer = Keyword.get(args, :initial_eps_bearer)
+    profile_index = Keyword.get(args, :profile_index)
 
     iccid_property = mobile_prop(ifname, "iccid")
     VintageNet.subscribe(iccid_property)
@@ -84,6 +87,10 @@ defmodule VintageNetQMI.Connection do
         registration_state: registration_state,
         connect_retry_interval: 30_000,
         radio_technologies: radio_technologies,
+        initial_eps_bearer: initial_eps_bearer,
+        profile_index: profile_index,
+        prefer_attach?: false,
+        reattached?: false,
         configuration: Configuration.new()
       }
       |> try_to_configure_modem()
@@ -119,13 +126,56 @@ defmodule VintageNetQMI.Connection do
     )
   end
 
+  defp try_run_configuration(:initial_eps_bearer_set, %{initial_eps_bearer: nil}), do: :ok
+
+  defp try_run_configuration(:initial_eps_bearer_set, state) do
+    bearer = state.initial_eps_bearer
+
+    with {:ok, index} <- initial_eps_bearer_profile(state.qmi),
+         {:ok, profile} <- WirelessData.get_profile_settings(state.qmi, index) do
+      if Profiles.up_to_date?(profile, bearer) do
+        :ok
+      else
+        Logger.info(
+          "[VintageNetQMI] setting the initial EPS bearer (profile #{index}) to APN #{inspect(bearer.apn)}"
+        )
+
+        set_initial_eps_bearer(state.qmi, index, bearer)
+      end
+    end
+  end
+
   defp try_run_configuration(:reporting_connection_stats, state) do
     WirelessData.set_event_report(state.qmi)
   end
 
-  defp try_run_configuration(:profile_settings_configured, _state) do
-    # This is a placeholder for future profile configuration verification
-    :ok
+  # The LTE attach profile, or the default profile on modems without an
+  # attach PDN list
+  defp initial_eps_bearer_profile(qmi) do
+    case attach_profile_index(qmi) do
+      nil -> WirelessData.get_default_profile_number(qmi)
+      index -> {:ok, index}
+    end
+  end
+
+  defp attach_profile_index(qmi) do
+    case WirelessData.get_lte_attach_pdn_list(qmi) do
+      {:ok, [index | _]} -> index
+      _ -> nil
+    end
+  end
+
+  # As ModemManager does: leave the network, change the attach profile and
+  # register again, so the next attach uses the new settings.
+  defp set_initial_eps_bearer(qmi, index, bearer) do
+    with :ok <- DeviceManagement.set_operating_mode(qmi, :low_power) do
+      result = write_profile(qmi, index, bearer)
+
+      case DeviceManagement.set_operating_mode(qmi, :online) do
+        :ok -> result
+        error -> error
+      end
+    end
   end
 
   @impl GenServer
@@ -207,17 +257,14 @@ defmodule VintageNetQMI.Connection do
     with :ok <- validate_iccid(iccid),
          {:ok, provider} <- ServiceProvider.select_provider_by_iccid(providers, iccid),
          PropertyTable.put(VintageNet, mobile_prop(state.ifname, "apn"), provider.apn),
-         {profile_index, attach_profile?} = data_profile(state),
-         previous_apn = profile_apn(state, profile_index),
-         :ok <- configure_profile_for_provider(provider, profile_index, state),
-         :ok <- maybe_reattach(attach_profile?, previous_apn, provider.apn, state),
+         {:ok, profile_index, kind} <- data_profile(provider, state),
+         PropertyTable.put(VintageNet, mobile_prop(state.ifname, "profile_index"), profile_index),
          :ok <- ensure_data_format(state),
-         {:ok, _} <-
-           WirelessData.start_network_interface(
-             state.qmi,
-             start_network_opts(provider, profile_index, attach_profile?)
-           ) do
-      Logger.info("[VintageNetQMI]: network started, waiting for IP configuration")
+         {:ok, _} <- start_network(provider, profile_index, kind, state) do
+      Logger.info(
+        "[VintageNetQMI]: network started on profile #{profile_index} (#{kind}), waiting for IP configuration"
+      )
+
       state
     else
       {:error, :no_provider} ->
@@ -239,15 +286,12 @@ defmodule VintageNetQMI.Connection do
         # so we don't need to try to connect again.
         state
 
-      {:error, :reattaching} ->
-        # The modem registers again with the new attach APN, which triggers
-        # the next connection attempt. The timer covers a missed indication.
-        start_try_to_connect_timer(state)
+      {:error, {:call_failed, reason, kind}} ->
+        handle_call_failure(reason, kind, state)
 
       {:error, reason} ->
         Logger.warning(
           "[VintageNetQMI]: could not connect for #{inspect(reason)}. " <>
-            "Check QMI.Driver logs for verbose call end reason. " <>
             "Retrying in #{inspect(state.connect_retry_interval)} ms."
         )
 
@@ -258,51 +302,117 @@ defmodule VintageNetQMI.Connection do
   defp validate_iccid(iccid) when is_binary(iccid), do: :ok
   defp validate_iccid(_iccid), do: {:error, :invalid_iccid}
 
-  # The data call goes on the LTE attach profile when the modem has one, so
-  # that on LTE it reuses the default bearer of the attach (see LteAttach).
-  defp data_profile(state) do
-    case LteAttach.attach_profile_index(state.qmi) do
-      {:ok, index} -> {index, true}
-      _ -> {@default_profile_index, false}
+  # Pick the profile for the data call and make it hold the provider's
+  # settings (see VintageNetQMI.Profiles). The attach profile is never
+  # written here: its settings come from the initial EPS bearer.
+  defp data_profile(provider, state) do
+    attach_index = attach_profile_index(state.qmi)
+
+    with {:ok, profiles} <- WirelessData.get_profile_list(state.qmi) do
+      choice =
+        Profiles.select(provider.apn, profiles, attach_index,
+          profile_index: state.profile_index,
+          prefer_attach?: state.prefer_attach?
+        )
+
+      use_profile(choice, profiles, provider, state.qmi)
     end
   end
 
-  defp profile_apn(state, profile_index) do
-    case WirelessData.get_profile_settings(state.qmi, profile_index) do
-      {:ok, %{apn: apn}} -> apn
-      _ -> nil
+  defp use_profile({:attach, index}, _profiles, _provider, _qmi), do: {:ok, index, :attach}
+
+  defp use_profile({kind, index}, profiles, provider, qmi) do
+    profile = Enum.find(profiles, &(&1.index == index))
+
+    with :ok <- ensure_profile(qmi, index, profile, provider) do
+      {:ok, index, kind}
     end
   end
 
-  # The attach happened with the APN the profile held before. On LTE the modem
-  # has to attach again for the network to bring up the bearer on the new APN;
-  # cycling through low power mode does that.
-  defp maybe_reattach(true = _attach_profile?, previous_apn, apn, state)
-       when previous_apn != apn do
-    if VintageNet.get(mobile_prop(state.ifname, "access_technology")) == :lte do
-      Logger.info(
-        "[VintageNetQMI] LTE attach APN changed from #{inspect(previous_apn)} to #{inspect(apn)}, re-attaching"
-      )
+  defp use_profile(:create, _profiles, provider, qmi) do
+    with {:ok, %{index: index}} <- WirelessData.create_profile(qmi, Profiles.settings(provider)) do
+      Logger.info("[VintageNetQMI] created profile #{index} for APN #{inspect(provider.apn)}")
+      {:ok, index, :created}
+    end
+  end
 
-      _ = DeviceManagement.set_operating_mode(state.qmi, :low_power)
-      _ = Process.send_after(self(), :reattach_online, @reattach_online_delay)
-      {:error, :reattaching}
-    else
+  defp ensure_profile(qmi, index, profile, wanted) do
+    if Profiles.up_to_date?(profile, wanted) do
       :ok
+    else
+      write_profile(qmi, index, wanted)
     end
   end
 
-  defp maybe_reattach(_attach_profile?, _previous_apn, _apn, _state), do: :ok
+  defp write_profile(qmi, index, wanted) do
+    case WirelessData.modify_profile_settings(qmi, index, Profiles.settings(wanted)) do
+      {:ok, %{extended_error_code: nil}} ->
+        :ok
 
-  # The profile already holds the APN. Passing it again for the attach profile
-  # makes the modem request a separate PDN connection instead of using the
-  # attach bearer.
-  defp start_network_opts(_provider, profile_index, true = _attach_profile?) do
-    [profile_3gpp_index: profile_index, timeout: @start_network_timeout]
+      {:ok, error} ->
+        Logger.warning("[VintageNetQMI] writing profile #{index} failed: #{inspect(error)}")
+        {:error, error}
+
+      error ->
+        Logger.warning("[VintageNetQMI] writing profile #{index} failed: #{inspect(error)}")
+        error
+    end
   end
 
-  defp start_network_opts(provider, profile_index, false = _attach_profile?) do
-    [apn: provider.apn, profile_3gpp_index: profile_index, timeout: @start_network_timeout]
+  # The profile holds the APN, so it is not passed again: with the APN the
+  # modem may ask for a new PDN instead of using the attach bearer.
+  defp start_network(provider, profile_index, kind, state) do
+    case WirelessData.start_network_interface(state.qmi,
+           profile_3gpp_index: profile_index,
+           ip_family: Profiles.ip_family(provider),
+           timeout: @start_network_timeout
+         ) do
+      {:error, {:call_failed, reason}} -> {:error, {:call_failed, reason, kind}}
+      other -> other
+    end
+  end
+
+  defp handle_call_failure(
+         %{
+           call_end_reason_type: :three_gpp_specification_defined,
+           verbose_call_end_reason: @pdn_already_on_apn
+         },
+         kind,
+         %{prefer_attach?: false} = state
+       )
+       when kind != :attach do
+    # The attach bearer already runs on this APN: use the attach profile.
+    Logger.info(
+      "[VintageNetQMI] the network already has a PDN on this APN, using the attach profile"
+    )
+
+    _ = Process.send_after(self(), :try_to_connect, @attach_fallback_delay)
+    %{state | prefer_attach?: true}
+  end
+
+  defp handle_call_failure(
+         %{
+           call_end_reason_type: :three_gpp_specification_defined,
+           verbose_call_end_reason: @pdn_already_on_apn
+         },
+         :attach,
+         %{reattached?: false} = state
+       ) do
+    # The attach still runs with settings the attach profile no longer holds.
+    Logger.info("[VintageNetQMI] the attach bearer is stale, registering again")
+
+    _ = DeviceManagement.set_operating_mode(state.qmi, :low_power)
+    _ = Process.send_after(self(), :reattach_online, @reattach_online_delay)
+    start_try_to_connect_timer(%{state | reattached?: true})
+  end
+
+  defp handle_call_failure(reason, kind, state) do
+    Logger.warning(
+      "[VintageNetQMI]: could not connect on the #{kind} profile: #{inspect(reason)}. " <>
+        "Retrying in #{inspect(state.connect_retry_interval)} ms."
+    )
+
+    start_try_to_connect_timer(state)
   end
 
   defp ensure_data_format(state) do
@@ -330,74 +440,6 @@ defmodule VintageNetQMI.Connection do
           :ok
       end
     end
-  end
-
-  defp configure_profile_for_provider(provider, profile_index, state) do
-    profile_settings = build_profile_settings(provider)
-
-    case WirelessData.modify_profile_settings(state.qmi, profile_index, profile_settings) do
-      {:ok, %{extended_error_code: nil}} ->
-        :ok
-
-      {:ok, has_error} ->
-        Logger.warning(
-          "[VintageNetQMI] Profile configuration returned error: #{inspect(has_error)}"
-        )
-
-        {:error, has_error}
-
-      error ->
-        Logger.warning("[VintageNetQMI] Failed to configure profile: #{inspect(error)}")
-        error
-    end
-  end
-
-  defp build_profile_settings(provider) do
-    base_settings = []
-
-    # Add roaming configuration (keep the inverted logic for compatibility)
-    roaming_settings =
-      case Map.get(provider, :roaming_allowed?) do
-        nil -> []
-        roaming_allowed? -> [roaming_disallowed: !roaming_allowed?]
-      end
-
-    # Add APN (always required)
-    apn_settings = [apn: provider.apn]
-
-    # Add optional authentication settings
-    auth_settings =
-      [
-        Map.get(provider, :username),
-        Map.get(provider, :password),
-        Map.get(provider, :auth_method)
-      ]
-      |> case do
-        [username, password, auth_method] when is_binary(username) and is_binary(password) ->
-          auth_method = auth_method || :pap_or_chap
-          [username: username, password: password, auth_method: auth_method]
-
-        [username, nil, _] when is_binary(username) ->
-          [username: username, auth_method: Map.get(provider, :auth_method) || :none]
-
-        [nil, password, _] when is_binary(password) ->
-          [password: password, auth_method: Map.get(provider, :auth_method) || :none]
-
-        _ ->
-          case Map.get(provider, :auth_method) do
-            nil -> []
-            auth_method -> [auth_method: auth_method]
-          end
-      end
-
-    # Add PDP type if specified
-    pdp_settings =
-      case Map.get(provider, :pdp_type) do
-        nil -> []
-        pdp_type -> [pdp_type: pdp_type]
-      end
-
-    base_settings ++ roaming_settings ++ apn_settings ++ auth_settings ++ pdp_settings
   end
 
   @doc """

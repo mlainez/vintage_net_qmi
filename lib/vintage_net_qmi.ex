@@ -40,6 +40,19 @@ defmodule VintageNetQMI do
     session and sets the modem to online mode at startup. Required for modems
     that need manual SIM session provisioning (e.g., Qualcomm MSM8974).
     Defaults to `false`.
+  * `:initial_eps_bearer` (optional) - the settings the modem attaches to LTE
+    with: a map with `:apn` and optionally `:pdp_type`, `:username`,
+    `:password` and `:auth_method`. They are written to the modem's LTE attach
+    profile, which makes the modem register again when they change. Without
+    it, the attach profile is left as the modem has it.
+  * `:profile_index` (optional) - the 3GPP profile to use for the data call,
+    for modems that need a specific one. By default VintageNetQMI picks it.
+
+  The data call runs on the LTE attach profile when that profile holds the
+  provider's APN, so that it uses the bearer the attach brought up; otherwise
+  on a profile that holds the APN, which is created when none does. The modem's
+  other profiles are not modified. The profile in use is published as
+  `["interface", ifname, "mobile", "profile_index"]`.
 
   The `:service_providers` key should be set to information provided by each of
   your service providers.
@@ -159,7 +172,9 @@ defmodule VintageNetQMI do
          [
            ifname: ifname,
            service_providers: qmi_opts.service_providers,
-           radio_technologies: radio_technologies_preference
+           radio_technologies: radio_technologies_preference,
+           initial_eps_bearer: qmi_opts[:initial_eps_bearer],
+           profile_index: qmi_opts[:profile_index]
          ]},
         if(ip_method == :qmi_profile, do: {VintageNetQMI.IPManager, ifname: ifname}),
         {VintageNetQMI.CellMonitor, [ifname: ifname]},

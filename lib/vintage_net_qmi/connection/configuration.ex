@@ -8,7 +8,14 @@ defmodule VintageNetQMI.Connection.Configuration do
 
   # Configuration logic for a network connection
 
-  @required_configuration_items [:radio_technologies_set]
+  # Items run in this order: the radio technologies and the initial EPS
+  # bearer are set before the modem registers for the data call.
+  @configuration_order [
+    :radio_technologies_set,
+    :initial_eps_bearer_set,
+    :reporting_connection_stats
+  ]
+  @required_configuration_items [:radio_technologies_set, :initial_eps_bearer_set]
 
   @typedoc """
   A connection configuration
@@ -17,11 +24,14 @@ defmodule VintageNetQMI.Connection.Configuration do
     stats
   * `:radio_technologies_set` - if the device is configured to use specified radio
     technologies
+  * `:initial_eps_bearer_set` - if the LTE attach profile holds the configured
+    initial EPS bearer settings
 
-  The `:radio_technologies_set` field needs to be marked as configured before the
-  configuration is considered configured. This is because switching the radio
-  technology during an established connection can have unknown side effects to
-  the stability of the mobile connection.
+  The `:radio_technologies_set` and `:initial_eps_bearer_set` fields need to be
+  marked as configured before the configuration is considered configured.
+  Switching the radio technology during an established connection can have
+  unknown side effects to the stability of the mobile connection, and changing
+  the initial EPS bearer makes the modem register again.
 
   Establishing a connection before setting the connection stats reporting is a
   safe operation and does not need to be configured to for the configuration to
@@ -29,10 +39,12 @@ defmodule VintageNetQMI.Connection.Configuration do
   """
   @type t() :: %{
           optional(:reporting_connection_stats) => boolean(),
-          :radio_technologies_set => boolean()
+          :radio_technologies_set => boolean(),
+          :initial_eps_bearer_set => boolean()
         }
 
-  @type configuration_setting() :: :reporting_connection_stats | :radio_technologies_set
+  @type configuration_setting() ::
+          :reporting_connection_stats | :radio_technologies_set | :initial_eps_bearer_set
 
   @typedoc """
   A function that is called when trying to configure a modem setting
@@ -49,9 +61,13 @@ defmodule VintageNetQMI.Connection.Configuration do
   @doc """
   Create a new connection configuration with all fields marked as not configured
   """
-  @spec new() :: %{reporting_connection_stats: false, radio_technologies_set: false}
+  @spec new() :: t()
   def new() do
-    %{reporting_connection_stats: false, radio_technologies_set: false}
+    %{
+      reporting_connection_stats: false,
+      radio_technologies_set: false,
+      initial_eps_bearer_set: false
+    }
   end
 
   @doc """
@@ -59,10 +75,7 @@ defmodule VintageNetQMI.Connection.Configuration do
   @spec run_configurations(t(), configuration_callback()) ::
           {:ok, t()} | {:error, atom(), configuration_setting(), t()}
   def run_configurations(configuration, func) do
-    config_items =
-      configuration
-      |> Enum.filter(fn {_, is_configured} -> !is_configured end)
-      |> Keyword.keys()
+    config_items = Enum.reject(@configuration_order, &Map.get(configuration, &1, true))
 
     case do_run_configurations(configuration, config_items, func) do
       {:error, _reason, _setting, _config} = error -> error

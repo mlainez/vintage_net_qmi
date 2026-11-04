@@ -37,6 +37,25 @@ defmodule VintageNetQMI.Connection.ConfigurationTest do
     end
   end
 
+  test "runs the items in order", %{config: config} do
+    {:ok, _} =
+      Configuration.run_configurations(config, fn item ->
+        send(self(), {:ran, item})
+        :ok
+      end)
+
+    assert [:radio_technologies_set, :initial_eps_bearer_set, :reporting_connection_stats] ==
+             ran_items([])
+  end
+
+  defp ran_items(acc) do
+    receive do
+      {:ran, item} -> ran_items([item | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
   describe "marking a setting configured" do
     test "reporting connection stats", %{config: config} do
       config = Configuration.setting_configured(config, :reporting_connection_stats)
@@ -56,8 +75,17 @@ defmodule VintageNetQMI.Connection.ConfigurationTest do
       refute Configuration.required_configured?(config)
     end
 
-    test "when they are", %{config: config} do
+    test "when only some are", %{config: config} do
       updated_config = Configuration.setting_configured(config, :radio_technologies_set)
+
+      refute Configuration.required_configured?(updated_config)
+    end
+
+    test "when they are", %{config: config} do
+      updated_config =
+        config
+        |> Configuration.setting_configured(:radio_technologies_set)
+        |> Configuration.setting_configured(:initial_eps_bearer_set)
 
       assert Configuration.required_configured?(updated_config)
     end
