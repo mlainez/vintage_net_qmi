@@ -10,15 +10,18 @@ defmodule VintageNetQMI.Connection do
 
   use GenServer
 
-  alias QMI.{NetworkAccess, WirelessData, WirelessDataAdmin}
+  alias QMI.{DeviceManagement, NetworkAccess, WirelessData, WirelessDataAdmin}
   alias QMI.Codec.WirelessData, as: WirelessDataCodec
   alias VintageNetQMI.Connection.Configuration
+  alias VintageNetQMI.LteAttach
   alias VintageNetQMI.ServiceProvider
 
   require Logger
 
   @configuration_retry 60_000
   @start_network_timeout 30_000
+  @default_profile_index 1
+  @reattach_online_delay 2_000
 
   @typedoc """
   Options for to establish the connection
@@ -176,6 +179,18 @@ defmodule VintageNetQMI.Connection do
     {:noreply, try_to_connect(state)}
   end
 
+  def handle_info(:reattach_online, state) do
+    case DeviceManagement.set_operating_mode(state.qmi, :online) do
+      :ok ->
+        :ok
+
+      error ->
+        Logger.warning("[VintageNetQMI] could not put the modem back online: #{inspect(error)}")
+    end
+
+    {:noreply, state}
+  end
+
   def handle_info(_message, state) do
     {:noreply, state}
   end
@@ -186,20 +201,21 @@ defmodule VintageNetQMI.Connection do
   end
 
   defp try_to_connect(state) do
-    three_3gpp_profile_index = 1
     iccid = state.iccid
     providers = state.service_providers
 
     with :ok <- validate_iccid(iccid),
          {:ok, provider} <- ServiceProvider.select_provider_by_iccid(providers, iccid),
          PropertyTable.put(VintageNet, mobile_prop(state.ifname, "apn"), provider.apn),
-         :ok <- configure_profile_for_provider(provider, three_3gpp_profile_index, state),
+         {profile_index, attach_profile?} = data_profile(state),
+         previous_apn = profile_apn(state, profile_index),
+         :ok <- configure_profile_for_provider(provider, profile_index, state),
+         :ok <- maybe_reattach(attach_profile?, previous_apn, provider.apn, state),
          :ok <- ensure_data_format(state),
          {:ok, _} <-
-           WirelessData.start_network_interface(state.qmi,
-             apn: provider.apn,
-             profile_3gpp_index: three_3gpp_profile_index,
-             timeout: @start_network_timeout
+           WirelessData.start_network_interface(
+             state.qmi,
+             start_network_opts(provider, profile_index, attach_profile?)
            ) do
       Logger.info("[VintageNetQMI]: network started, waiting for IP configuration")
       state
@@ -223,6 +239,11 @@ defmodule VintageNetQMI.Connection do
         # so we don't need to try to connect again.
         state
 
+      {:error, :reattaching} ->
+        # The modem registers again with the new attach APN, which triggers
+        # the next connection attempt. The timer covers a missed indication.
+        start_try_to_connect_timer(state)
+
       {:error, reason} ->
         Logger.warning(
           "[VintageNetQMI]: could not connect for #{inspect(reason)}. " <>
@@ -236,6 +257,53 @@ defmodule VintageNetQMI.Connection do
 
   defp validate_iccid(iccid) when is_binary(iccid), do: :ok
   defp validate_iccid(_iccid), do: {:error, :invalid_iccid}
+
+  # The data call goes on the LTE attach profile when the modem has one, so
+  # that on LTE it reuses the default bearer of the attach (see LteAttach).
+  defp data_profile(state) do
+    case LteAttach.attach_profile_index(state.qmi) do
+      {:ok, index} -> {index, true}
+      _ -> {@default_profile_index, false}
+    end
+  end
+
+  defp profile_apn(state, profile_index) do
+    case WirelessData.get_profile_settings(state.qmi, profile_index) do
+      {:ok, %{apn: apn}} -> apn
+      _ -> nil
+    end
+  end
+
+  # The attach happened with the APN the profile held before. On LTE the modem
+  # has to attach again for the network to bring up the bearer on the new APN;
+  # cycling through low power mode does that.
+  defp maybe_reattach(true = _attach_profile?, previous_apn, apn, state)
+       when previous_apn != apn do
+    if VintageNet.get(mobile_prop(state.ifname, "access_technology")) == :lte do
+      Logger.info(
+        "[VintageNetQMI] LTE attach APN changed from #{inspect(previous_apn)} to #{inspect(apn)}, re-attaching"
+      )
+
+      _ = DeviceManagement.set_operating_mode(state.qmi, :low_power)
+      _ = Process.send_after(self(), :reattach_online, @reattach_online_delay)
+      {:error, :reattaching}
+    else
+      :ok
+    end
+  end
+
+  defp maybe_reattach(_attach_profile?, _previous_apn, _apn, _state), do: :ok
+
+  # The profile already holds the APN. Passing it again for the attach profile
+  # makes the modem request a separate PDN connection instead of using the
+  # attach bearer.
+  defp start_network_opts(_provider, profile_index, true = _attach_profile?) do
+    [profile_3gpp_index: profile_index, timeout: @start_network_timeout]
+  end
+
+  defp start_network_opts(provider, profile_index, false = _attach_profile?) do
+    [apn: provider.apn, profile_3gpp_index: profile_index, timeout: @start_network_timeout]
+  end
 
   defp ensure_data_format(state) do
     # If the driver has a sysfs raw_ip knob, QMI.configure_linux/1 already
